@@ -51,7 +51,7 @@ if ($ok) {
     <label>อีเมล <input type="email" name="email" required></label>
     <label>รหัสผ่าน <input type="password" name="password" required></label>
     <button class="primary-btn" type="submit">เข้าสู่ระบบ</button>
-    <p class="muted">ยังไม่มีผู้ดูแล? ไปที่ <a href="install.php">ติดตั้งแอดมินคนแรก</a></p>
+    <!-- <p class="muted">ยังไม่มีผู้ดูแล? ไปที่ <a href="install.php">สร้างแอดมินคนแรก</a></p> -->
   </form>
 </main>
 </body></html>

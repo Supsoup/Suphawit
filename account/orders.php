@@ -1,137 +1,177 @@
 <?php
-session_start();
+if (session_status() === PHP_SESSION_NONE) session_start();
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../lib/helpers.php';
+require_once __DIR__ . '/../lib/user.php';
 
-if (empty($_SESSION['user'])) {
-  $_SESSION['redirect_to'] = '/account/orders.php';
-  header('Location: ../auth/login.php'); exit;
-}
+require_user('account/orders.php');
 
-// หมดอายุ/คืนสต็อก
+// 1) เคลียร์ออเดอร์ที่หมดเวลา (ระบบยกเลิกและคืนสต๊อก)
 expireStaleOrders($pdo);
 
-$uid = (int)$_SESSION['user']['id'];
-$st = $pdo->prepare("
-  SELECT o.id, o.status, o.total_amount, o.placed_at, o.expires_at,
-         (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id=o.id) AS item_count,
-         (SELECT slip_path FROM payments p WHERE p.order_id=o.id ORDER BY id DESC LIMIT 1) AS slip_path,
-         GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), COALESCE(o.expires_at, DATE_ADD(o.placed_at, INTERVAL 10 MINUTE)))) AS remain_seconds
+$uid  = (int) current_user()['id'];
+$csrf = ensure_csrf();
+
+// 2) ดึงประวัติออเดอร์ของผู้ใช้ (รวมเวลาคงเหลือแบบวินาทีที่ MySQL คำนวณให้)
+$sql = "
+  SELECT
+    o.id,
+    o.status,
+    o.total_amount,
+    o.placed_at,
+    o.expires_at,
+
+    -- จำนวนรายการ (กี่ชนิด)
+    (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS item_rows,
+
+    -- จำนวนชิ้นรวม (qty รวมทั้งหมด)
+    (SELECT COALESCE(SUM(oi.qty), 0) FROM order_items oi WHERE oi.order_id = o.id) AS total_qty,
+
+    (SELECT p.slip_path FROM payments p WHERE p.order_id=o.id ORDER BY p.id DESC LIMIT 1) AS slip_path,
+    GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), o.expires_at)) AS pay_remain,
+    GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), LEAST(DATE_ADD(o.placed_at, INTERVAL 5 MINUTE), o.expires_at))) AS cancel_remain
   FROM orders o
   WHERE o.user_id = ?
   ORDER BY o.placed_at DESC
   LIMIT 100
-");
+";
+
+$st = $pdo->prepare($sql);
 $st->execute([$uid]);
 $orders = $st->fetchAll(PDO::FETCH_ASSOC);
 
-$csrf = ensure_csrf();
+// ฟังก์ชันแปลง badge สถานะ
+function badge(string $status): string {
+  $map = [
+    'PENDING_PAYMENT'       => ['#9a3412', '#fff7ed', 'รอชำระเงิน'],
+    'PAID_CHECKING'         => ['#0ea5e9', '#ecfeff', 'รอตรวจสอบ'],
+    'PAID_CONFIRMED'        => ['#16a34a', '#ecfdf5', 'ชำระแล้ว'],
+    'SHIPPING'              => ['#4f46e5', '#eef2ff', 'กำลังจัดส่ง'],
+    'COMPLETED'             => ['#155e75', '#e0f2fe', 'เสร็จสิ้น'],
+    'TIMEOUT_BY_SYSTEM'     => ['#b91c1c', '#fee2e2', 'หมดเวลาชำระ (ระบบยกเลิก)'],
+    'CANCELLED_BY_CUSTOMER' => ['#991b1b', '#fee2e2', 'ยกเลิกโดยผู้สั่งซื้อ'],
+    'CANCELLED_INVALID'     => ['#991b1b', '#fee2e2', 'สลิปไม่ถูกต้อง/ยกเลิกโดยแอดมิน'],
+  ];
+  [$c,$bg,$label] = $map[$status] ?? ['#374151','#f3f4f6',$status];
+  return '<span style="display:inline-block;padding:.2rem .6rem;border-radius:999px;font-weight:700;color:'.$c.';background:'.$bg.'">'.$label.'</span>';
+}
+
+// flash message
+$flash = '';
+if (!empty($_SESSION['flash_info'])) { $flash = $_SESSION['flash_info']; unset($_SESSION['flash_info']); }
+if (!empty($_SESSION['flash_error'])){ $flash = $_SESSION['flash_error']; unset($_SESSION['flash_error']); }
 ?>
 <!doctype html>
 <html lang="th">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>คำสั่งซื้อของฉัน</title>
 <link rel="stylesheet" href="../assets/styles.css">
+<style>
+.table{width:100%;border-collapse:collapse;background:#fff;border-radius:14px;overflow:hidden}
+.table th,.table td{border-bottom:1px solid #e5e7eb;padding:12px;text-align:left}
+.table th{background:#f8fafc;font-weight:800}
+.kpill{display:inline-block;border:1px solid #cbd5e1;border-radius:10px;padding:8px 12px;text-decoration:none;color:#111827}
+.kpill.primary{background:#1d4ed8;color:#fff;border-color:#1d4ed8}
+.muted{color:#64748b}
+.count{font-weight:800}
+.msg{margin-bottom:12px;padding:10px;border-radius:10px}
+.msg.ok{background:#dcfce7;color:#065f46;border:1px solid #bbf7d0}
+.msg.err{background:#fee2e2;color:#991b1b;border:1px solid #fecaca}
+.badge-note{display:inline-block;padding:.2rem .6rem;border-radius:8px;background:#f1f5f9;color:#334155}
+</style>
 </head>
 <body>
 <header class="topbar">
   <a class="brand-pill" href="../index.php">Game Zone Decor</a>
   <div style="flex:1"></div>
-  <span class="muted" style="margin-right:8px">สวัสดี, <?= htmlspecialchars($_SESSION['user']['name']) ?></span>
-  <a class="btn-outline" href="../auth/logout.php">ออก</a>
+  <span class="muted" style="margin-right:8px">สวัสดี, <?=htmlspecialchars(current_user()['name'] ?? current_user()['email'])?></span>
+  <a class="kpill" href="../auth/logout.php">ออก</a>
 </header>
 
 <main class="container">
   <h2 class="section-title">คำสั่งซื้อของฉัน</h2>
 
-  <?php if (!empty($_GET['cancel_success'])): ?>
-    <p style="color:green">ยกเลิกคำสั่งซื้อเรียบร้อย และคืนสต็อกแล้ว</p>
-  <?php elseif (!empty($_GET['cancel_error'])): ?>
-    <p style="color:red"><?= htmlspecialchars($_GET['cancel_error']) ?></p>
+  <?php if ($flash): ?>
+    <div class="msg ok"><?=htmlspecialchars($flash)?></div>
   <?php endif; ?>
 
-  <table class="cart-table">
-    <tr>
-      <th>#</th><th>สถานะ</th><th>รายการ</th><th>ยอดรวม</th>
-      <th>สั่งเมื่อ</th><th>สลิป</th><th>การชำระเงิน</th><th>การดำเนินการ</th>
-    </tr>
-    <?php foreach ($orders as $o): ?>
-      <?php
-        $remain = (int)$o['remain_seconds'];
-        $canCancel = ($o['status']==='PENDING_PAYMENT' && $remain > 0);
-      ?>
+  <table class="table">
+    <thead>
       <tr>
-        <td>#<?= (int)$o['id'] ?></td>
-        <td><?= htmlspecialchars($o['status']) ?></td>
-        <td><?= (int)$o['item_count'] ?> ชิ้น</td>
-        <td><?= number_format((float)$o['total_amount']) ?> THB</td>
-        <td><?= htmlspecialchars($o['placed_at']) ?></td>
-        <td><?= $o['slip_path'] ? 'มี' : '-' ?></td>
-        <td>
-          <?php if ($o['status']==='PENDING_PAYMENT'): ?>
-            <a class="btn-outline" href="../upload-slip.php?order_id=<?= (int)$o['id'] ?>">อัปโหลดสลิป</a>
-          <?php elseif ($o['status']==='PAID_CHECKING'): ?>
-            รอตรวจสอบ
-          <?php elseif ($o['status']==='PAID_CONFIRMED'): ?>
-            ชำระแล้ว
-          <?php elseif ($o['status']==='SHIPPING'): ?>
-            กำลังจัดส่ง
-          <?php elseif ($o['status']==='EXPIRED'): ?>
-            หมดเวลา
-          <?php elseif ($o['status']==='CANCELLED'): ?>
-            ยกเลิกแล้ว
-          <?php else: ?>-<?php endif; ?>
-        </td>
-        <td>
-          <?php if ($canCancel): ?>
-            <div>
-              <small class="muted">เหลือเวลา:</small>
-              <strong class="countdown" data-remaining="<?= (int)$remain ?>">--:--</strong>
-            </div>
-            <form method="post" action="cancel_order.php"
-                  data-cancel
-                  onsubmit="return confirm('ยืนยันยกเลิกคำสั่งซื้อ #<?= (int)$o['id'] ?> ?');" style="display:inline">
-              <input type="hidden" name="csrf" value="<?= htmlspecialchars($csrf) ?>">
-              <input type="hidden" name="order_id" value="<?= (int)$o['id'] ?>">
-              <button class="btn-outline" type="submit">ยกเลิก (ภายใน 5 นาที)</button>
-            </form>
-          <?php else: ?>
-            <span class="muted">-</span>
-          <?php endif; ?>
-        </td>
+        <th>#</th>
+        <th>สถานะ</th>
+        <th>รายการ</th>
+        <th>ยอดรวม</th>
+        <th>สั่งเมื่อ</th>
+        <th>การชำระเงิน</th>
+        <th>การดำเนินการ</th>
       </tr>
-    <?php endforeach; ?>
-    <?php if (empty($orders)): ?>
-      <tr><td colspan="8" class="muted">ยังไม่มีคำสั่งซื้อ</td></tr>
-    <?php endif; ?>
+    </thead>
+    <tbody>
+      <?php if (!$orders): ?>
+        <tr><td colspan="7" class="muted" style="text-align:center">ยังไม่มีคำสั่งซื้อ</td></tr>
+      <?php endif; ?>
+
+      <?php foreach ($orders as $o): ?>
+        <?php
+          $id = (int)$o['id'];
+          $remainPay = (int)$o['pay_remain'];
+          $remainCan = (int)$o['cancel_remain'];
+          $payable   = ($o['status']==='PENDING_PAYMENT' && $remainPay>0);
+          $cancelable= ($o['status']==='PENDING_PAYMENT' && $remainCan>0);
+        ?>
+        <tr>
+          <td>#<?=$id?></td>
+          <td><?=badge($o['status'])?></td>
+          <td><?= (int)$o['total_qty'] ?> ชิ้น</td>
+          <td><?=number_format((float)$o['total_amount'])?> THB</td>
+          <td><?=htmlspecialchars($o['placed_at'])?></td>
+          <td>
+            <?php if ($payable): ?>
+              <a class="kpill primary" href="../upload-slip.php?id=<?=$id?>">ชำระเงิน/อัปโหลดสลิป</a>
+              <div class="muted" style="margin-top:6px">
+                เหลือเวลาโอน: <span class="count" data-pay="<?=$remainPay?>"></span>
+              </div>
+            <?php else: ?>
+              <?=$o['slip_path'] ? '<span class="badge-note">มีสลิปแล้ว</span>' : '<span class="muted">-</span>'?>
+            <?php endif; ?>
+          </td>
+          <td>
+            <?php if ($cancelable): ?>
+              <form method="post" action="cancel_order.php" onsubmit="return confirm('ยืนยันยกเลิกคำสั่งซื้อ #<?=$id?> ?');" style="display:inline-block">
+                <input type="hidden" name="csrf" value="<?=$csrf?>">
+                <input type="hidden" name="order_id" value="<?=$id?>">
+                <button class="kpill" type="submit">ยกเลิก (ภายใน 5 นาที)</button>
+              </form>
+              <div class="muted" style="margin-top:6px">
+                เหลือเวลายกเลิก: <span class="count" data-can="<?=$remainCan?>"></span>
+              </div>
+            <?php else: ?>
+              <span class="muted">-</span>
+            <?php endif; ?>
+          </td>
+        </tr>
+      <?php endforeach; ?>
+    </tbody>
   </table>
 </main>
 
 <script>
-// นับถอยหลังจากวินาทีที่เหลือแบบอิสระจากโซนเวลา
+// นับถอยหลังตามวินาทีที่ MySQL คำนวณให้ — ไม่ผูกกับ timezone ของ browser
 (function(){
-  document.querySelectorAll('.countdown').forEach(el=>{
-    let sec = parseInt(el.dataset.remaining,10);
-    const row  = el.closest('tr');
-    const form = row ? row.querySelector('form[data-cancel]') : null;
-    const btn  = form ? form.querySelector('button') : null;
-
-    function tick(){
-      if (isNaN(sec) || sec <= 0){
-        el.textContent = '00:00';
-        if (btn){ btn.disabled = true; btn.textContent = 'หมดเวลายกเลิก'; }
-        return;
-      }
-      const m = String(Math.floor(sec/60)).padStart(2,'0');
-      const s = String(sec%60).padStart(2,'0');
-      el.textContent = m+':'+s;
-      sec--;
-      setTimeout(tick, 1000);
-    }
-    tick();
-  });
+  function fmt(sec){ if (sec<0) sec=0; var m=Math.floor(sec/60); var s=('0'+(sec%60)).slice(-2); return (m<10?'0':'')+m+':'+s; }
+  function tick(){
+    document.querySelectorAll('[data-pay]').forEach(el=>{
+      var v = parseInt(el.getAttribute('data-pay'),10); el.textContent = fmt(v); v--; el.setAttribute('data-pay', v);
+      if (v<=0) location.reload(); // ให้ reload เพื่ออัปเดตสถานะหลังหมดเวลา
+    });
+    document.querySelectorAll('[data-can]').forEach(el=>{
+      var v = parseInt(el.getAttribute('data-can'),10); el.textContent = fmt(v); v--; el.setAttribute('data-can', v);
+    });
+    setTimeout(tick, 1000);
+  }
+  tick();
 })();
 </script>
 </body>

@@ -41,8 +41,9 @@ if (!function_exists('expireStaleOrders')) {
           $up->execute([(int)$r['qty'], (int)$r['product_id']]);
         }
 
-        // เปลี่ยนสถานะเป็น EXPIRED
-        $pdo->prepare("UPDATE orders SET status='EXPIRED' WHERE id=?")->execute([$oid]);
+        // เปลี่ยนสถานะเป็น EXPIRED + เหตุผลโดยระบบ
+        $pdo->prepare("UPDATE orders SET status='EXPIRED', cancel_reason='TIMEOUT_BY_SYSTEM' WHERE id=?")->execute([$oid]);
+
 
         $pdo->commit();
       } catch (Throwable $e) {

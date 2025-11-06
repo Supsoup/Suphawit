@@ -1,4 +1,5 @@
 <?php
+  
 // lib/user.php
 if (!function_exists('current_user')) {
   function current_user(): ?array {

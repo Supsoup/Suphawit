@@ -220,3 +220,47 @@ body{
   width:100%; padding:10px; border:1px solid var(--line); border-radius:8px; font:inherit;
 }
 .checkout-form button{align-self:flex-start}
+
+/* ===== ปรับตำแหน่งเมนูขวาใน Topbar (ใช้กับ index.php เดิม) ===== */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ให้ทุก element ใน topbar อยู่เรียงซ้ายถึงขวา 
+   โดยช่องค้นหาขยายเต็ม และส่วนเมนูขวาถูกดันไปสุดขวา */
+.topbar form.search-pill {
+  flex: 1; /* ช่องค้นหาขยายกลาง */
+}
+
+.topbar a.btn-outline,
+.topbar .muted,
+.topbar .cart-btn {
+  margin-left: 6px;  /* ลดระยะห่างให้ใกล้กัน */
+}
+
+/* ปรับปุ่มต่างๆ ให้แนบกันมากขึ้น */
+.topbar .btn-outline {
+  padding: 8px 12px;
+  border-radius: 12px;
+}
+
+.topbar .cart-btn {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  margin-left: 6px;
+}
+
+.topbar .muted {
+  margin-left: auto; /* ดันจาก “สวัสดี” เป็นต้นไปให้ไปสุดขวา */
+  color: var(--muted);
+  font-weight: 500;
+}
